@@ -682,8 +682,8 @@ def _build_footer_elements(
                 if zh:
                     zh_parts.append(zh)
         if en_parts:
-            en_lines.append(" · ".join(en_parts))
-            zh_lines.append(" · ".join(zh_parts))
+            en_lines.append(" ".join(en_parts))
+            zh_lines.append(" ".join(zh_parts))
 
     if not en_lines:
         return []
@@ -860,7 +860,7 @@ def _render_footer_field(
             en_val, zh_val = _T["api_calls"]
             if show_label:
                 return f'<text_tag color="purple">{en_val} {v}</text_tag>', f'<text_tag color="purple">{zh_val} {v}</text_tag>'
-            return f'<text_tag color="purple">{v}</text_tag>', f'<text_tag color="purple">{v}</text_tag>'
+            return f'<text_tag color="purple">{v} rounds</text_tag>', f'<text_tag color="purple">{v} 轮</text_tag>'
         return None, None
 
     if name == "history_offset":
