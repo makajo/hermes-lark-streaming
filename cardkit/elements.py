@@ -836,10 +836,12 @@ def _render_footer_field(
         output_t = data.get("output_tokens", 0) or 0
         reasoning_t = data.get("reasoning_tokens", 0) or 0
         if input_t or output_t:
-            v = f"↑ {_compact(input_t)} ↓ {_compact(output_t)}"
+            v_en = f"In {_compact(input_t)} Out {_compact(output_t)}"
+            v_zh = f"输入 {_compact(input_t)} 输出 {_compact(output_t)}"
             if reasoning_t:
-                v += f" 💭 {_compact(reasoning_t)}"
-            return f'<text_tag color="indigo">{v}</text_tag>', f'<text_tag color="indigo">{v}</text_tag>'
+                v_en += f" Thought {_compact(reasoning_t)}"
+                v_zh += f" 思考 {_compact(reasoning_t)}"
+            return f'<text_tag color="indigo">{v_en}</text_tag>', f'<text_tag color="indigo">{v_zh}</text_tag>'
         return None, None
 
     if name == "context":

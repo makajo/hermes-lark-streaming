@@ -210,8 +210,8 @@ class TestBuildFooterElements:
             {"input_tokens": 1000, "output_tokens": 500},
             fields=[["tokens"]],
         )
-        assert "↑" in result[1]["content"]
-        assert "↓" in result[1]["content"]
+        assert "In" in result[1]["content"]
+        assert "Out" in result[1]["content"]
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -306,7 +306,7 @@ class TestBuildFooterElements:
             fields=[["tokens"]],
         )
         assert len(result) >= 2
-        assert "💭" in result[1]["content"]
+        assert "Thought" in result[1]["content"]
 
     def test_tokens_without_reasoning_no_thinking_icon(self) -> None:
         result = _build_footer_elements(
@@ -314,7 +314,7 @@ class TestBuildFooterElements:
             fields=[["tokens"]],
         )
         assert len(result) >= 2
-        assert "💭" not in result[1]["content"]
+        assert "Thought" not in result[1]["content"]
 
 
 # --- 错误面板 ---
