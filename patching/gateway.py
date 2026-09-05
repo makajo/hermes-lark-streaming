@@ -72,6 +72,11 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
+        # Only intercept Feishu platform
+        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
+        if platform_name not in ("feishu", "lark"):
+            return await orig(self, event, source, *args, **kwargs)
+
         mid = event.message_id
         anchor_id = self._reply_anchor_for_event(event)
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""
@@ -242,6 +247,24 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         channel_prompt=None,
         **kwargs,
     ):
+        # Only intercept Feishu platform
+        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
+        if platform_name not in ("feishu", "lark"):
+            return await orig(
+                self,
+                message,
+                context_prompt,
+                history,
+                source,
+                session_id,
+                session_key=session_key,
+                run_generation=run_generation,
+                _interrupt_depth=_interrupt_depth,
+                event_message_id=event_message_id,
+                channel_prompt=channel_prompt,
+                **kwargs,
+            )
+
         # message's ID. We must create a fresh context for the recursive call
         _saved_parent_ctx = None  # Will hold parent context for restoration
         _original_msg_context_ref = None  # Reference to the original msg_context dict
