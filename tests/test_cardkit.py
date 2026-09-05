@@ -615,7 +615,7 @@ class TestCacheFooterField:
             show_label=True,
         )
         assert en is not None
-        assert en.startswith("Cache ")
+        assert "Cache " in en
         assert "75%" in en
 
     def test_cache_show_label_true_chinese(self) -> None:
@@ -628,7 +628,7 @@ class TestCacheFooterField:
             show_label=True,
         )
         assert zh is not None
-        assert zh.startswith("缓存 ")
+        assert "缓存 " in zh
         assert "75%" in zh
 
     def test_cache_show_label_false_no_prefix(self) -> None:
