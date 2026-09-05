@@ -49,11 +49,14 @@ class HermesCompat:
         self.run_agent_module: Any | None = None
         
         # GatewayRunner
-        try:
-            from gateway.run import GatewayRunner
-            self.gateway_runner_class = GatewayRunner
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: GatewayRunner not available yet")
+        # NOTE: Do NOT use 'from gateway.run import ...' here because gateway.run
+        # is currently being executed by the main thread during gateway startup,
+        # which would trigger a circular import lock deadlock with plugin discovery.
+        gw_mod = sys.modules.get("gateway.run")
+        if gw_mod is not None:
+            self.gateway_runner_class = getattr(gw_mod, "GatewayRunner", None)
+        else:
+            self.gateway_runner_class = None
         
         # AIAgent
         try:
@@ -119,8 +122,8 @@ class HermesCompat:
                 _logger.debug("HLS: conversation_loop resolved via sys.modules")
                 return
         
-        # Strategy 2: Anchor-based discovery
-        for anchor_name in ("gateway.run", "run_agent"):
+        # Strategy 2: Anchor-based discovery (do NOT import gateway.run dynamically to avoid deadlock)
+        for anchor_name in ("hermes_cli", "run_agent"):
             anchor = sys.modules.get(anchor_name)
             if anchor is None:
                 try:
@@ -131,7 +134,7 @@ class HermesCompat:
             if not anchor_file:
                 continue
             repo_root = Path(anchor_file).resolve().parent
-            if anchor_name == "gateway.run":
+            if anchor_name in ("gateway.run", "hermes_cli"):
                 repo_root = repo_root.parent
             cl_file = repo_root / "agent" / "conversation_loop.py"
             if not cl_file.is_file():

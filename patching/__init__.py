@@ -296,6 +296,10 @@ def apply_patches() -> None:
                     _logger.info(
                         "hermes-lark-streaming: GatewayRunner patched (delayed) ✓"
                     )
+                    try:
+                        _apply_direct_agent_patch()
+                    except Exception:
+                        pass
                     return
             # Timeout — gateway.run never became available
             _logger.error(
