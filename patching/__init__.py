@@ -296,6 +296,10 @@ def apply_patches() -> None:
                     _logger.info(
                         "hermes-lark-streaming: GatewayRunner patched (delayed) ✓"
                     )
+                    global _patch_status
+                    if isinstance(_patch_status, dict):
+                        _patch_status["gateway_runner"] = "✓"
+                        _patch_status["background_task"] = "✓"
                     try:
                         _apply_direct_agent_patch()
                     except Exception:
