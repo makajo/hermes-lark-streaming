@@ -640,8 +640,9 @@ def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> di
             return None
 
         source = getattr(event, "source", None)
-        platform = getattr(getattr(source, "platform", None), "value", "")
-        if platform != "feishu":
+        p = getattr(source, "platform", None)
+        val = getattr(p, "value", p)
+        if str(val or "").lower() not in ("feishu", "lark"):
             return None
 
         chat_id = getattr(source, "chat_id", "") if source else ""

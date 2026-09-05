@@ -14,7 +14,18 @@ from . import (
 def _resolve_eid(fallback_eid: str | None) -> str | None:
     """Re-resolve the current event_message_id from _msg_ctx at call time."""
     _eid = _get_event_message_id()
-    return _eid if _eid else fallback_eid
+    if _eid:
+        return _eid
+    if fallback_eid:
+        try:
+            from ..controller import get_controller
+            ctrl = get_controller()
+            sess = ctrl._sess_get(fallback_eid)
+            if sess is not None and not sess.is_terminal_phase:
+                return fallback_eid
+        except Exception:
+            pass
+    return None
 
 def _maybe_wrap_callbacks(agent) -> None:
     """Replace streaming callbacks on *agent* with wrappers that also fire

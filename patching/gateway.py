@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import time
 from typing import Any, Callable
@@ -17,6 +18,13 @@ from . import (
     _send_result_ok,
 )
 
+def _is_feishu_platform(source: Any) -> bool:
+    if source is None:
+        return False
+    p = getattr(source, "platform", None)
+    val = getattr(p, "value", p)
+    return str(val or "").lower() in ("feishu", "lark")
+
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
 def _wrap_handle_message(orig: Callable) -> Callable:
@@ -24,13 +32,17 @@ def _wrap_handle_message(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, *args, **kwargs):
+        _source = getattr(event, "source", None)
+        if not _is_feishu_platform(_source):
+            return await orig(self, event, *args, **kwargs)
+
         # NORMALIZE hook — fires before any message processing
         try:
             from .hooks import on_feishu_normalize
 
             on_feishu_normalize(
                 message_id=event.message_id,
-                source=event.source,
+                source=_source,
                 event=event,
                 reply_anchor_id=self._reply_anchor_for_event(event),
             )
@@ -39,27 +51,24 @@ def _wrap_handle_message(orig: Callable) -> Callable:
 
         try:
             _text = (getattr(event, "text", "") or "").strip()
-            if _text.lower().startswith("/aowen"):
-                _source = getattr(event, "source", None)
-                _platform = getattr(getattr(_source, "platform", None), "value", "")
-                if _platform == "feishu" and hasattr(self, "_running_agents"):
-                    _quick_key = None
-                    try:
-                        _quick_key = self._session_key_for_source(_source)
-                    except Exception:
-                        _logger.debug("HLS: _session_key_for_source failed", exc_info=True)
-                    if _quick_key and _quick_key in self._running_agents:
-                        # Agent is running — send interrupt hint card
-                        from ..aowen import build_interrupt_hint_card, _send_card_async
-                        _chat_id = getattr(_source, "chat_id", "") if _source else ""
-                        if _chat_id:
-                            _logger.info(
-                                "HLS: /aowen during active agent (session=%s), "
-                                "sending interrupt hint card",
-                                str(_quick_key)[:12],
-                            )
-                            _send_card_async(_chat_id, build_interrupt_hint_card(), "interrupt_hint")
-                            return ""
+            if _text.lower().startswith("/aowen") and hasattr(self, "_running_agents"):
+                _quick_key = None
+                try:
+                    _quick_key = self._session_key_for_source(_source)
+                except Exception:
+                    _logger.debug("HLS: _session_key_for_source failed", exc_info=True)
+                if _quick_key and _quick_key in self._running_agents:
+                    # Agent is running — send interrupt hint card
+                    from ..aowen import build_interrupt_hint_card, _send_card_async
+                    _chat_id = getattr(_source, "chat_id", "") if _source else ""
+                    if _chat_id:
+                        _logger.info(
+                            "HLS: /aowen during active agent (session=%s), "
+                            "sending interrupt hint card",
+                            str(_quick_key)[:12],
+                        )
+                        _send_card_async(_chat_id, build_interrupt_hint_card(), "interrupt_hint")
+                        return ""
         except Exception:
             _logger.debug("HLS: /aowen interrupt hint check failed", exc_info=True)
 
@@ -73,8 +82,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
         # Only intercept Feishu platform
-        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
-        if platform_name not in ("feishu", "lark"):
+        if not _is_feishu_platform(source):
             return await orig(self, event, source, *args, **kwargs)
 
         mid = event.message_id
@@ -117,7 +125,25 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
         try:
             result = await orig(self, event, source, *args, **kwargs)
-        except BaseException:
+        except BaseException as exc:
+            try:
+                from ..controller import get_controller
+                _ctrl = get_controller()
+                if _ctrl and _ctrl.enabled:
+                    _eid = msg_context.get("event_message_id", "") or mid
+                    _sess = _ctrl._sess_get(_eid)
+                    if _sess and not _sess.is_terminal_phase:
+                        _elapsed = time.monotonic() - msg_context.get("_msg_start_time", time.monotonic())
+                        from .hooks import on_message_completed
+                        on_message_completed(
+                            message_id=_eid,
+                            answer="",
+                            duration=_elapsed,
+                            error_message=str(exc) or "Exception occurred during execution",
+                            aborted=isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)),
+                        )
+            except Exception:
+                _logger.warning("HLS: failed to seal card on exception", exc_info=True)
             _hls_cleanup_ctx()
             raise
 
@@ -248,8 +274,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         **kwargs,
     ):
         # Only intercept Feishu platform
-        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
-        if platform_name not in ("feishu", "lark"):
+        if not _is_feishu_platform(source):
             return await orig(
                 self,
                 message,
@@ -555,19 +580,23 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
     """Inject START/COMPLETE hooks for ``/background`` tasks so they get streaming cards."""
 
     @functools.wraps(orig)
-    async def wrapper(self, prompt, source, task_id, **kwargs):
+    async def wrapper(self, prompt, source, task_id, event_message_id=None, **kwargs):
         # Only intercept Feishu platform
-        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
-        if platform_name not in ("feishu", "lark"):
-            return await orig(self, prompt, source, task_id, **kwargs)
+        if not _is_feishu_platform(source):
+            return await orig(self, prompt, source, task_id, event_message_id=event_message_id, **kwargs)
 
         chat_id = getattr(source, "chat_id", "")
+        anchor_id = (
+            event_message_id
+            if event_message_id and str(event_message_id).startswith("om_")
+            else None
+        )
 
         # Set up message context so _maybe_wrap_callbacks works
         _msg_ctx.set({
             "message_id": task_id,
             "chat_id": chat_id,
-            "anchor_id": None,  # No reply anchor for background tasks
+            "anchor_id": anchor_id,  # Reply anchor if available
             "event_message_id": task_id,  # Use task_id so callbacks find a valid eid
             "card_sent": False,
             "_msg_start_time": time.monotonic(),
@@ -578,7 +607,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
         # ── Fire START hook ──
         try:
             from .hooks import on_message_started
-            on_message_started(message_id=task_id, chat_id=chat_id, anchor_id=None)
+            on_message_started(message_id=task_id, chat_id=chat_id, anchor_id=anchor_id)
         except Exception:
             _logger.debug("background task START hook failed", exc_info=True)
 
@@ -611,7 +640,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 
         # v1.3.4 fix (P1): orig() + COMPLETE hook 都在 try 块内，finally
         try:
-            result = await orig(self, prompt, source, task_id, **kwargs)
+            result = await orig(self, prompt, source, task_id, event_message_id=event_message_id, **kwargs)
 
             # ── Fire COMPLETE hook ──
             ctx = _msg_ctx.get()

@@ -998,7 +998,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             from ..cardkit.md import optimize_markdown_style
             content = optimize_markdown_style(text) or text
             reply_id = session.anchor_id or session.message_id
-            await self._client.reply_text(reply_id, content)
+            if reply_id and str(reply_id).startswith("om_"):
+                await self._client.reply_text(reply_id, content)
+            elif session.chat_id:
+                await self._client.send_text_to_chat(session.chat_id, content)
+            else:
+                await self._client.reply_text(reply_id, content)
             _logger.info(
                 "text fallback sent: msg=%s len=%d",
                 (session.message_id or "?")[:12],

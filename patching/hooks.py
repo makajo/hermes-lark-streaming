@@ -46,7 +46,7 @@ def on_feishu_normalize(
         return
 
     platform = getattr(getattr(source, "platform", None), "value", "")
-    if platform != "feishu":
+    if platform not in ("feishu", "lark"):
         return
 
     # v1.8.0 (P2-1): WS 渠道活性脉冲——每条到达 _handle_message 的飞书消息

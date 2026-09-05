@@ -144,7 +144,12 @@ class UnifiedControllerMixin:
                     print_step=self._cfg.print_step,
                 )
                 card_id = await self._client.cardkit_create(card)
-                card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
+                if reply_to and str(reply_to).startswith("om_"):
+                    card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
+                elif session.chat_id:
+                    card_msg_id = await self._client.send_card_by_id_to_chat(session.chat_id, card_id)
+                else:
+                    card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
 
                 session.card_id = card_id
                 session.card_msg_id = card_msg_id
