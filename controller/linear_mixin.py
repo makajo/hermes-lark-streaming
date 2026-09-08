@@ -144,7 +144,10 @@ class UnifiedControllerMixin:
                     print_step=self._cfg.print_step,
                 )
                 card_id = await self._client.cardkit_create(card)
-                if reply_to and str(reply_to).startswith("om_"):
+                is_synthetic = str(reply_to).startswith(("bg_", "cron_", "task_"))
+                if is_synthetic and session.chat_id:
+                    card_msg_id = await self._client.send_card_by_id_to_chat(session.chat_id, card_id)
+                elif reply_to:
                     card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
                 elif session.chat_id:
                     card_msg_id = await self._client.send_card_by_id_to_chat(session.chat_id, card_id)

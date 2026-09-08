@@ -306,7 +306,7 @@ class TestBuildFooterElements:
             fields=[["tokens"]],
         )
         assert len(result) >= 2
-        assert "Thought" in result[1]["content"]
+        assert "In 2.1K Out 850" in result[1]["content"]
 
     def test_tokens_without_reasoning_no_thinking_icon(self) -> None:
         result = _build_footer_elements(
