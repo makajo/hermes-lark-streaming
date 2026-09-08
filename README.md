@@ -4,8 +4,13 @@
   <img src="https://img.shields.io/badge/Project-Hardened%20Fork-blue" alt="Hardened Fork">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.8.0--patch4-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.8.1--hardened-ff9800.svg" alt="Version">
   <img src="https://img.shields.io/badge/Hermes%20Agent-%3E%3D0.20.0-6f42c1.svg" alt="Hermes Agent">
+</p>
+
+<p align="center">
+  <a href="https://github.com/makajo/hermes-lark-streaming"><img src="https://img.shields.io/badge/GitHub-makajo%2Fhermes--lark--streaming-181717?logo=github&logoColor=white" alt="GitHub"></a>
+  <a href="https://github.com/Aowen-Nowor/hermes-lark-streaming"><img src="https://img.shields.io/badge/Upstream-Aowen--Nowor%2Fhermes--lark--streaming-blue?logo=github&logoColor=white" alt="Upstream"></a>
 </p>
 
 <p align="center">

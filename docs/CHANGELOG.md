@@ -1,3 +1,24 @@
+## v1.8.1 (2026-09-07)
+
+外部反馈专项审计落地版 — 对全部外部用户反馈逐项核实（3-5 轮，先验证后动手：每项均对照 v1.8.0 代码与 hermes-agent v0.21.0 源码确认真实成立才纳入修复，不成立的项本项目不处理也不记录）。本轮落地 5 项确认问题（P1×4 / P2×1），其中 3 项为多渠道/长任务场景下从未被生产流量暴露的结构性缺陷。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | **话题并发误杀**：飞书话题群/群内话题中，同一 chat 的不同话题在 hermes 侧是独立会话（session key 含 thread_id），但并发打断检查只比较 chat_id——话题 B 的新消息会把话题 A 还在流式输出的卡片误封 | 并发 seal 隔离键缺 thread_id 维度 | 隔离键改为 `(thread_id or chat_id)`：`CardSession` 新增 `thread_id` 字段，START/INTERRUPTED 钩子链与续写重激活全部传递/继承该键；话题内（同 thread）新消息打断旧卡、普通群聊/私聊（无 thread）退回 chat 维度——与 hermes 会话语义逐场景对齐，现有行为零回归 (`state/session.py`, `controller/core.py`, `patching/hooks.py`, `patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **续卡竞态泄漏**：长任务流式卡被服务端关闭触发重激活（old→cont 路由注册）后，若任务继续运行超过会话 TTL（600s），任意新消息触发的过期回收会无条件销毁该路由——hermes 后续的 on_answer/on_completed(old) 重定向落空，续写新卡永远停在流式态，且非终态会话只告警不清理（泄漏） | `_cleanup` 无条件 pop continuation 路由，与"续写目标会话还活着"的真实状态脱钩 | TTL 回收前置检查：续写目标仍非终态时延迟回收本会话——路由生命周期与续写会话严格同步（目标封卡终态 → 其自身回收时反向清理路由 → 下轮回收本会话）；`_continuation_map` 增加 200 条上界（与 interrupt map 同构）兜底"目标永不到达终态"的极端泄漏 (`controller/core.py`) |
+| 🐛 Bug Fix (P1) | **agent 异常后卡片永转圈 + 会话泄漏**：hermes 把 agent 层异常捕获后转成错误**字符串**返回（run.py except 分支，不走 completed/aborted 回调），插件的 COMPLETE 包装器只认 result dict——对字符串 result 取 `.get` 抛 AttributeError 被吞，外层又因会话存在而抑制文本回复：流式卡永远停在加载动画、非终态会话永不回收 | COMPLETE hook 未覆盖 except 分支的字符串返回值形态 | 字符串 result 分支：以错误字符串作为 `error_message` 封卡（卡片转错误态展示、会话正常终态回收）；封卡成功置 `card_sent`，由既有抑制机制接管（错误文本已上卡，不重复发纯文本）；递归中断场景同步恢复父上下文 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **非飞书渠道消息误建卡会话**：多渠道部署（QQ/Telegram 等与飞书同装）时，任何渠道的消息都会触发飞书流式卡会话创建——对非 om_ 消息 id 调用回复建卡必然失败，会话停在 CREATION_FAILED（终态、无泄漏，但每次刷错误日志） | START 钩子注入点无平台过滤 | 源头堵：START 钩子仅对 feishu/lark 平台调用；非飞书消息不建会话，下游各回调包装器因查不到会话自然放行纯文本——各渠道行为互不干扰 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P2) | **/bg 后台任务从未出过流式卡**：hermes /bg 处理器把用户消息的回复锚（om_ id）作为 `event_message_id` 传入，包装器签名未显式接收、被 `**kwargs` 吞掉——START 钩子只拿合成 task_id（`bg_时间戳_十六进制`）建卡，对非消息 id 回复必然失败。v1.4.0 引入 /bg 卡片支持以来从未成功过；生产未发现是因为生产从未使用 /bg | 包装器未尊重 hermes 传入的锚点参数 | 包装器显式接收 `event_message_id` 并作为卡片回复锚（/bg 流式卡回复到用户的命令消息上）；话题隔离键同步传递；锚点原样透传 hermes 自身投递逻辑（话题路由不受影响）；旧版 hermes 不传该参数时保持旧行为（无回归）(`patching/gateway.py`) |
+| 🧪 Test | 新增 21 个 v1.8.1 回归测试 `test_v181_fixes.py` | 防回归 | 覆盖：话题隔离 7 项（跨话题不打断/同话题打断/无话题回退 chat/父 chat 不扰话题/记录 thread_id/interrupt 继承/重激活继承）、续卡竞态 4 项（活跃延迟回收/终态正常回收/两轮闭环/上界）、错误字符串封卡 3 项（封卡+error 展示/无 ctx 透传/dict 路径回归保护）、平台守卫 3 项（feishu 传递 thread_id/telegram 跳过/qq 跳过）、/bg 锚点 4 项（锚点传递/透传 hermes/旧版兼容/非飞书透传）；另 4 个 v1.3.0 hook 转发断言按新签名契约更新（thread_id=None 显式化） |
+
+**审计方法**: 外部反馈专项审计（3-5 轮，全部"先验证、后实施"：报告内容逐项对照 v1.8.0 真实代码核实，不因出处存疑跳过、也不未经证实采纳）。①话题隔离键由 hermes session key 构造源码证实（群聊场景 thread_id 进 key、话题=独立会话）与飞书入站 thread_id 解析链（`message.thread_id or root_id`，adapter 源码 3368）证实，另核对了引用消息虚假 thread_id 的既有修正（on_feishu_normalize）；②续卡竞态沿 v1.4.0 重激活机制的完整生命周期推演（注册 → old 封卡终态 → TTL 回收 → 回调重定向落空 → 续卡孤儿），闭环由 v1.4.0 已有的 stale-key 反向清理承接；③错误字符串返回路径读 hermes `_run_agent` except 分支源码（run.py 22805-22919）确认返回值形态，插件侧 COMPLETE 包装器对 str result 的失败由代码路径推演证实；④平台守卫与 /bg 锚点均直接对照 hermes 调用方源码（`_handle_message_with_agent` 调用链 / `_handle_background_command → _run_background_task` 的 event_message_id 传参）；⑤修复后全量测试见下（940 单元 + 22 e2e mock + 28 集成）。
+
+**已知限制**:
+- 话题隔离依赖入站 thread_id：引用回复的虚假 thread_id 已由 on_feishu_normalize 先行修正；hermes 适配层未来改动 thread_id 语义时话题隔离会退化为旧的 chat 维度（无功能破坏）
+- /bg 卡片回复锚依赖传入 event_message_id 的 hermes 版本；更旧版本保持无锚行为（卡创建失败路径，与 v1.8.1 之前一致）
+- agent 异常封卡覆盖"错误字符串返回"路径；agent 进程级崩溃（无任何返回值）仍依赖既有 TTL 告警机制
+
+
 ## v1.8.0 (2026-09-04)
 
 生产日志审计落地版 — 基于 v1.7.0 两个月的生产行为（8FiX7X 日志 3-5 轮审计）+ hermes-agent v0.21.0（tag v2026.8.31）源码交叉验证。本轮共修复 10 项确认问题（P1×2 / P2×3 / P3×5），全部经用户确认范围后实施。审计结论：v1.7.0 生产表现优秀（0 ERROR / 0 失败 / 0 孤儿卡片 / clarify 6/6 全成），风险全部在插件边界之外（依赖矩阵、SDK 静默重连、宿主机网络）——本版补齐这些盲区的可观测性与防护。
