@@ -165,30 +165,61 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
         # AST injection, so we return None to simulate "stale agent result",
         if result is not None:
-            if ctx and ctx.get("card_sent"):
-                _logger.info(
-                    "card already sent for msg=%s, suppressing gateway reply",
-                    mid[:12],
-                )
-                _hls_cleanup_ctx()
-                return None
+            _card_completed_with_content = False
+            _sess_to_seal = None
+            _ctrl = None
             try:
                 from ..controller import get_controller
                 _ctrl = get_controller()
                 if _ctrl and _ctrl.enabled:
-                    _eid = ctx.get("event_message_id", "") if ctx else ""
+                    _eid = (ctx.get("event_message_id", "") or mid) if ctx else ""
                     if _eid:
                         _sess = _ctrl._sess_get(_eid)
                         if _sess and _sess.card_msg_id:
-                            _logger.info(
-                                "card session exists for msg=%s (state=%s), suppressing gateway reply",
-                                mid[:12], _sess.state,
-                            )
-                            ctx["card_sent"] = True
-                            _hls_cleanup_ctx()
-                            return None
+                            # Verify whether the card has genuinely completed with answer content
+                            _has_answer = False
+                            if _sess.unified_state and _sess.unified_state.answer_text and _sess.unified_state.answer_text.strip():
+                                _has_answer = True
+                            elif _sess.text and _sess.text.display_text and _sess.text.display_text.strip():
+                                _has_answer = True
+                            elif _sess.error_message and _sess.error_message.strip():
+                                _has_answer = True
+
+                            if _sess.state in TERMINAL_PHASES and _has_answer:
+                                _card_completed_with_content = True
+                            else:
+                                _logger.warning(
+                                    "HLS: card exists for msg=%s but not completed with content "
+                                    "(state=%s, has_answer=%s) — releasing gateway reply as fallback",
+                                    mid[:12], _sess.state, _has_answer,
+                                )
+                                if _sess.state not in TERMINAL_PHASES and _sess.state != "completing":
+                                    _sess_to_seal = _sess
             except Exception:
-                _logger.warning("HLS: suppressed exception", exc_info=True)
+                _logger.warning("HLS: suppressed exception checking card state", exc_info=True)
+
+            if _card_completed_with_content:
+                _logger.info(
+                    "card already sent and completed for msg=%s, suppressing gateway reply",
+                    mid[:12],
+                )
+                ctx["card_sent"] = True
+                _hls_cleanup_ctx()
+                return None
+            else:
+                if ctx and ctx.get("card_sent"):
+                    _logger.warning(
+                        "HLS: ctx.card_sent is True but card has no completed content for msg=%s; "
+                        "releasing gateway reply to avoid dropping message",
+                        mid[:12],
+                    )
+                # If card is stuck in streaming/non-terminal, stop the loading animation cleanly
+                if _sess_to_seal is not None:
+                    try:
+                        from .hooks import on_message_aborted
+                        on_message_aborted(ctrl=_ctrl, message_id=mid)
+                    except Exception:
+                        pass
         # None (the "Discarding stale agent result" path or the
         if result is None:
             if ctx and ctx.get("card_sent"):

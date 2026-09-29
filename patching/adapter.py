@@ -60,6 +60,26 @@ def _is_cron_delivery_metadata(metadata: Any) -> bool:
     return isinstance(metadata, dict) and bool(metadata.get("job_id"))
 
 
+def _is_interim_send(metadata: Any) -> bool:
+    """Detect interim / progress / heartbeat sends from Hermes gateway.
+
+    Interim sends carry metadata['_interim_send'] = True (or heartbeat/status indicators).
+    These must never be treated as turn-final agent responses or set card_sent=True.
+    """
+    if not isinstance(metadata, dict):
+        return False
+    return bool(
+        metadata.get("_interim_send")
+        or metadata.get("interim")
+        or metadata.get("is_interim")
+        or metadata.get("heartbeat")
+        or metadata.get("notification_category") in ("progress", "heartbeat", "status")
+    )
+
+
+_is_relay_interim_send = _is_interim_send
+
+
 async def _dispatch_feishu_outbound(
     adapter: Any,
     chat_id: str,
@@ -128,6 +148,27 @@ async def _dispatch_feishu_outbound(
                 exc_info=True,
             )
         # cron card failed → fall through to plain-text passthrough below
+
+    # ── Interim sends (heartbeats, progress notices) ──
+    if _is_interim_send(metadata):
+        ctx = _msg_ctx.get(None)
+        if ctx is not None:
+            eid = ctx.get("event_message_id", "") or ctx.get("message_id", "")
+            if eid:
+                try:
+                    from ..controller import get_controller
+                    _ctrl = get_controller()
+                    if _ctrl and _ctrl.enabled:
+                        _sess = _ctrl._sess_get(eid)
+                        if _sess and _sess.card_msg_id:
+                            _logger.debug(
+                                "feishu_adapter_send: suppressing interim send without setting card_sent (card active for msg=%s)",
+                                eid[:12],
+                            )
+                            return _send_result_ok()
+                except Exception:
+                    pass
+        return await passthrough()
 
     # ── Agent path: suppress duplicate text reply ──
     ctx = _msg_ctx.get(None)
@@ -321,13 +362,6 @@ def _resolve_relay_logical_platform(adapter: Any, chat_id: Any, metadata: Any) -
     if isinstance(platform_map, dict):
         return str(platform_map.get(str(chat_id), "") or "").lower()
     return ""
-
-
-def _is_relay_interim_send(metadata: Any) -> bool:
-    """Consumer-declared interim send (commentary / tail flush) — NOT the
-    turn-final. Same posture as native mode's "agent still running"
-    passthrough: never convert interim frames into cards."""
-    return isinstance(metadata, dict) and bool(metadata.get("_interim_send"))
 
 
 def _wrap_relay_adapter_send(orig_send: Callable) -> Callable:
