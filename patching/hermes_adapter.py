@@ -59,12 +59,15 @@ class HermesCompat:
             self.gateway_runner_class = None
         
         # AIAgent
-        try:
-            from run_agent import AIAgent
-            self.aiagent_class = AIAgent
-            self.run_agent_module = sys.modules.get("run_agent")
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: AIAgent not available yet")
+        # NOTE: Do NOT use 'from run_agent import ...' here because run_agent
+        # imports model_tools which calls discover_plugins(), triggering circular import deadlock.
+        ra_mod = sys.modules.get("run_agent")
+        if ra_mod is not None:
+            self.aiagent_class = getattr(ra_mod, "AIAgent", None)
+            self.run_agent_module = ra_mod
+        else:
+            self.aiagent_class = None
+            self.run_agent_module = None
         
         # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
         # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
