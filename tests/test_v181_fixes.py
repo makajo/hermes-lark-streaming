@@ -1,6 +1,13 @@
 """v1.8.1 regression tests — five confirmed fixes from the GitHub issue audit.
 
 Covers (all validated against hermes-agent v0.21.0 source before fixing):
+
+Re-validated on hermes-agent v0.21.1 (tag v2026.9.7, v1.8.2): all 21 tests
+plus the full suite (940 unit + 22 e2e + 30 integration) pass unchanged —
+the v1.8.1 fixes are version-insensitive (hermes 0.21.1's file split moved
+internal symbol addresses but preserved every production surface this
+plugin patches).
+
   * P1 thread-scope isolation: the concurrency seal key drops from
     ``chat_id`` to ``thread_id or chat_id`` — different topics in one Feishu
     chat are independent hermes sessions (session key includes thread_id,

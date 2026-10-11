@@ -4,8 +4,8 @@
   <img src="https://img.shields.io/badge/Project-Hardened%20Fork-blue" alt="Hardened Fork">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.8.1--hardened-ff9800.svg" alt="Version">
-  <img src="https://img.shields.io/badge/Hermes%20Agent-%3E%3D0.20.0-6f42c1.svg" alt="Hermes Agent">
+  <img src="https://img.shields.io/badge/version-1.8.4--hardened-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/Hermes%20Agent-%3E%3D0.21.0-6f42c1.svg" alt="Hermes Agent">
 </p>
 
 <p align="center">
