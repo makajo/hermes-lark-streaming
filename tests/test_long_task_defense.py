@@ -14,10 +14,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hermes_lark_streaming.controller import CardSession, StreamCardController
-from hermes_lark_streaming.controller.mixin import COMPLETED, STREAMING
+from hermes_lark_streaming.controller.mixin import COMPLETED, COMPLETING, STREAMING
 from hermes_lark_streaming.patching import _msg_ctx
 from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound, _is_interim_send
-from hermes_lark_streaming.patching.gateway import _wrap_handle_message_with_agent
+from hermes_lark_streaming.patching.gateway import (
+    _wrap_handle_message,
+    _wrap_handle_message_with_agent,
+    _wrap_run_agent,
+    _wrap_run_background_task,
+)
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 from tests.test_controller import _make_session, _setup_ctrl
 
@@ -136,3 +141,58 @@ class TestGatewayReplyFallback:
 
         # Successfully delivered on card -> suppress text duplicate!
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_completed_or_completing_card_never_aborted_on_none_result(self) -> None:
+        """When orig() returns None and card is completing/completed, never call on_message_aborted."""
+        ctrl = _setup_ctrl()
+        session = _make_session("om_completing_msg")
+        session.card_msg_id = "om_completing_card"
+        session.state = COMPLETING
+        ctrl._sess_put("om_completing_msg", session)
+
+        orig = AsyncMock(return_value=None)
+        wrapped = _wrap_handle_message_with_agent(orig)
+
+        event = SimpleNamespace(message_id="om_completing_msg", text="restart")
+        source = SimpleNamespace(
+            platform=SimpleNamespace(value="feishu"),
+            chat_id="oc_test",
+            thread_id=None,
+        )
+        self_mock = MagicMock()
+        self_mock._reply_anchor_for_event = MagicMock(return_value="om_completing_msg")
+
+        with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl), patch(
+            "hermes_lark_streaming.patching.hooks.on_message_aborted"
+        ) as mock_abort:
+            result = await wrapped(self_mock, event, source)
+
+        assert result is None
+        mock_abort.assert_not_called()
+
+
+class TestDoubleWrapPrevention:
+    """Verify GatewayRunner wrappers prevent double wrapping."""
+
+    def test_wrappers_idempotent(self) -> None:
+        async def dummy_handle(self, event, *a, **k): return None
+        async def dummy_hmwa(self, event, source, *a, **k): return None
+        async def dummy_run_agent(self, *a, **k): return {}
+        async def dummy_bg(self, *a, **k): return {}
+
+        w1 = _wrap_handle_message(dummy_handle)
+        w1_dup = _wrap_handle_message(w1)
+        assert w1_dup is w1
+
+        w2 = _wrap_handle_message_with_agent(dummy_hmwa)
+        w2_dup = _wrap_handle_message_with_agent(w2)
+        assert w2_dup is w2
+
+        w3 = _wrap_run_agent(dummy_run_agent)
+        w3_dup = _wrap_run_agent(w3)
+        assert w3_dup is w3
+
+        w4 = _wrap_run_background_task(dummy_bg)
+        w4_dup = _wrap_run_background_task(w4)
+        assert w4_dup is w4

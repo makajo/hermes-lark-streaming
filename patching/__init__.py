@@ -323,69 +323,76 @@ def _maybe_start_deferred_poller(
     )
     _t.start()
 
+_gw_patch_lock = threading.Lock()
+
 def _apply_gateway_runner_patches() -> bool:
     """Apply the three critical GatewayRunner method patches."""
     global _gw_runner_patched
 
-    if _gw_runner_patched:
-        return True  # Already patched (e.g. immediate path succeeded)
+    with _gw_patch_lock:
+        if _gw_runner_patched:
+            return True  # Already patched (e.g. immediate path succeeded)
 
-    GatewayRunner = HermesCompat().gateway_runner_class
-    if GatewayRunner is None:
-        return False  # Not available yet
-
-    try:
-        # Patch each method individually so one missing method
-        # doesn't prevent the others from being patched.
-        _patched_methods = []
-        if hasattr(GatewayRunner, '_handle_message'):
-            GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
-            _patched_methods.append('_handle_message')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message not found, skipping patch")
-
-        if hasattr(GatewayRunner, '_handle_message_with_agent'):
-            GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
-                GatewayRunner._handle_message_with_agent
-            )
-            _patched_methods.append('_handle_message_with_agent')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message_with_agent not found, skipping patch")
-
-        if hasattr(GatewayRunner, '_run_agent'):
-            GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
-            _patched_methods.append('_run_agent')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
+        GatewayRunner = HermesCompat().gateway_runner_class
+        if GatewayRunner is None:
+            return False  # Not available yet
 
         try:
-            GatewayRunner._run_background_task = _wrap_run_background_task(
-                GatewayRunner._run_background_task
-            )
-            _patched_methods.append('_run_background_task')
-        except AttributeError:
-            _logger.debug("hermes-lark-streaming: _run_background_task not found, background cards disabled")
+            # Patch each method individually so one missing method
+            # doesn't prevent the others from being patched.
+            _patched_methods = []
+            if hasattr(GatewayRunner, '_handle_message'):
+                if getattr(GatewayRunner._handle_message, '_hls_wrapped', False) is not True:
+                    GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
+                _patched_methods.append('_handle_message')
+            else:
+                _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message not found, skipping patch")
 
-        if not _patched_methods:
+            if hasattr(GatewayRunner, '_handle_message_with_agent'):
+                if getattr(GatewayRunner._handle_message_with_agent, '_hls_wrapped', False) is not True:
+                    GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
+                        GatewayRunner._handle_message_with_agent
+                    )
+                _patched_methods.append('_handle_message_with_agent')
+            else:
+                _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message_with_agent not found, skipping patch")
+
+            if hasattr(GatewayRunner, '_run_agent'):
+                if getattr(GatewayRunner._run_agent, '_hls_wrapped', False) is not True:
+                    GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
+                _patched_methods.append('_run_agent')
+            else:
+                _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
+
+            try:
+                if getattr(GatewayRunner._run_background_task, '_hls_wrapped', False) is not True:
+                    GatewayRunner._run_background_task = _wrap_run_background_task(
+                        GatewayRunner._run_background_task
+                    )
+                _patched_methods.append('_run_background_task')
+            except AttributeError:
+                _logger.debug("hermes-lark-streaming: _run_background_task not found, background cards disabled")
+
+            if not _patched_methods:
+                _logger.error(
+                    "hermes-lark-streaming: GatewayRunner patch FAILED — "
+                    "no methods found. Streaming cards will NOT work."
+                )
+                return False
+
+            _gw_runner_patched = True
+            _logger.info(
+                "hermes-lark-streaming: GatewayRunner patched methods: %s",
+                ', '.join(_patched_methods),
+            )
+            return True
+        except (ImportError, AttributeError) as e:
             _logger.error(
                 "hermes-lark-streaming: GatewayRunner patch FAILED — "
-                "no methods found. Streaming cards will NOT work."
+                "gateway.run found but incompatible. "
+                "Streaming cards will NOT work. Error: %s", e,
             )
             return False
-
-        _gw_runner_patched = True
-        _logger.info(
-            "hermes-lark-streaming: GatewayRunner patched methods: %s",
-            ', '.join(_patched_methods),
-        )
-        return True
-    except (ImportError, AttributeError) as e:
-        _logger.error(
-            "hermes-lark-streaming: GatewayRunner patch FAILED — "
-            "gateway.run found but incompatible. "
-            "Streaming cards will NOT work. Error: %s", e,
-        )
-        return False
 
 def apply_patches() -> None:
     """Apply all runtime monkey patches to ``GatewayRunner`` and ``AIAgent``."""
@@ -410,43 +417,12 @@ def apply_patches() -> None:
             gw_patched = True
             _logger.info("hermes-lark-streaming: GatewayRunner patched ✓")
     else:
-        # gateway.run not yet loaded — start delayed-patch poll thread
+        # gateway.run not yet loaded — deferred patch will poll via unified poller
         _logger.info(
             "hermes-lark-streaming: gateway.run not loaded yet — "
-            "starting delayed patch poll (2s interval, 60s timeout)",
+            "deferred patch will poll via unified poller",
         )
         gw_delayed = True
-
-        def _delayed_gw_patch():
-            """Poll for gateway.run and apply GatewayRunner patches once available."""
-            deadline = time.monotonic() + 60.0  # 60-second timeout
-            while time.monotonic() < deadline:
-                time.sleep(2.0)  # Poll every 2 seconds
-                if _apply_gateway_runner_patches():
-                    _logger.info(
-                        "hermes-lark-streaming: GatewayRunner patched (delayed) ✓"
-                    )
-                    global _patch_status
-                    if isinstance(_patch_status, dict):
-                        _patch_status["gateway_runner"] = "✓"
-                        _patch_status["background_task"] = "✓"
-                    try:
-                        _apply_direct_agent_patch()
-                    except Exception:
-                        pass
-                    return
-            # Timeout — gateway.run never became available
-            _logger.error(
-                "hermes-lark-streaming: gateway.run NOT FOUND after 60s — "
-                "this Hermes version may be too old or installed incorrectly. "
-                "Streaming cards will NOT work. "
-                "Please check: 1) Hermes is running via gateway mode, "
-                "2) Hermes version >= v0.5.0, "
-                "3) Re-run: hermes setup && hermes gateway start",
-            )
-
-        _delayed_thread = threading.Thread(target=_delayed_gw_patch, daemon=True)
-        _delayed_thread.start()
 
     _module_patch_applied = False
     if compat.has_conversation_loop:

@@ -92,6 +92,8 @@ def _session_usage_from(ctx: dict | None, result: Any) -> tuple[dict[str, Any], 
 
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
+    if getattr(orig, "_hls_wrapped", False) is True:
+        return orig
 
     @functools.wraps(orig)
     async def wrapper(self, event, *args, **kwargs):
@@ -137,10 +139,13 @@ def _wrap_handle_message(orig: Callable) -> Callable:
 
         return await orig(self, event, *args, **kwargs)
 
+    setattr(wrapper, "_hls_wrapped", True)
     return wrapper
 
 def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
     """Inject START hook at entry and ABORT/INTERRUPT detection on return."""
+    if getattr(orig, "_hls_wrapped", False) is True:
+        return orig
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
@@ -348,13 +353,31 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 # else: card completed normally, Hermes returned None
                 #       to suppress text reply — NOT an abort.
             else:
-                # Card was never sent — real abort (error, reset, /stop, etc.)
+                # v1.8.4 fix: check if the card is already completing/completed
+                # before firing an erroneous abort (e.g. context desync, double-wrap, or race)
+                _is_card_done = False
+                _ctrl_for_abort = None
                 try:
-                    from .hooks import on_message_aborted
-
-                    on_message_aborted(message_id=mid)
+                    from ..controller import get_controller
+                    _ctrl_for_abort = get_controller()
+                    if _ctrl_for_abort and _ctrl_for_abort.enabled:
+                        _eid = (ctx.get("event_message_id", "") or mid) if ctx else mid
+                        _sess = _ctrl_for_abort._sess_get(_eid) or _ctrl_for_abort._sess_get(mid)
+                        if _sess and (_sess.state in TERMINAL_PHASES or _sess.state == "completing"):
+                            _is_card_done = True
                 except Exception:
-                    _logger.warning("HLS: suppressed exception", exc_info=True)
+                    pass
+
+                if not _is_card_done:
+                    # Card was never sent — real abort (error, reset, /stop, etc.)
+                    try:
+                        from ..controller import get_controller
+                        from .hooks import on_message_aborted
+
+                        _c = _ctrl_for_abort or get_controller()
+                        on_message_aborted(ctrl=_c, message_id=mid)
+                    except Exception:
+                        _logger.warning("HLS: suppressed exception", exc_info=True)
         elif ctx and ctx.get("card_sent"):
             try:
                 from ..controller import get_controller
@@ -382,10 +405,13 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
         return result
 
+    setattr(wrapper, "_hls_wrapped", True)
     return wrapper
 
 def _wrap_run_agent(orig: Callable) -> Callable:
     """Inject COMPLETE hook after agent runs; propagate event_message_id."""
+    if getattr(orig, "_hls_wrapped", False) is True:
+        return orig
 
     @functools.wraps(orig)
     async def wrapper(
@@ -691,6 +717,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
 
         return result
 
+    setattr(wrapper, "_hls_wrapped", True)
     return wrapper
 
 def _wrap_run_conversation(orig: Callable) -> Callable:
@@ -744,6 +771,8 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
 
 def _wrap_run_background_task(orig: Callable) -> Callable:
     """Inject START/COMPLETE hooks for ``/background`` tasks so they get streaming cards."""
+    if getattr(orig, "_hls_wrapped", False) is True:
+        return orig
 
     @functools.wraps(orig)
     async def wrapper(self, prompt, source, task_id, event_message_id=None, **kwargs):
@@ -886,6 +915,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
             _msg_ctx.set(None)
             _thread_local_ctx.data = None
 
+    setattr(wrapper, "_hls_wrapped", True)
     return wrapper
 
 # ── Cron delivery wrapper ──────────────────────────────────────────
