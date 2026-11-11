@@ -310,11 +310,18 @@ def _maybe_start_deferred_poller(
 
         _left = [k for k, v in pending.items() if v]
         if _left:
-            _logger.error(
-                "hermes-lark-streaming: deferred patch targets NOT resolved within 60s: "
-                "%s — streaming cards may be partially unavailable. Run /aowen doctor.",
-                _left,
-            )
+            is_gateway = "gateway.run" in sys.modules or any("gateway" in str(arg) for arg in sys.argv)
+            if is_gateway:
+                _logger.error(
+                    "hermes-lark-streaming: deferred patch targets NOT resolved within 60s: "
+                    "%s — streaming cards may be partially unavailable. Run /aowen doctor.",
+                    _left,
+                )
+            else:
+                _logger.debug(
+                    "hermes-lark-streaming: non-gateway process — skipped deferred patch resolution for %s",
+                    _left,
+                )
         else:
             _logger.info("hermes-lark-streaming: all deferred patch targets resolved ✓")
 

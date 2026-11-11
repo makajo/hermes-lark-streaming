@@ -49,6 +49,14 @@ def on_feishu_normalize(
     if platform not in ("feishu", "lark"):
         return
 
+    # Check for re-entrancy on the same MessageEvent (e.g. SessionAuthority admission replay)
+    if getattr(event, "_hls_normalized", False) is True:
+        return
+    try:
+        event._hls_normalized = True
+    except Exception:
+        pass
+
     # v1.8.0 (P2-1): WS 渠道活性脉冲——每条到达 _handle_message 的飞书消息
     # 都证明 WS 长连接活着（lark SDK 重连耗尽后线程静默死亡、适配器仍报
     # 已连接，last_inbound 是 /aowen monitor 唯一可见的活性信号）。

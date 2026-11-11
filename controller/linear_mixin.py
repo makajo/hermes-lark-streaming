@@ -463,16 +463,35 @@ class UnifiedControllerMixin:
             if state.answer_dirty:
                 content = state.escaped_answer_view() or " "
                 session.sequence += 1
-                try:
-                    await self._client.cardkit_stream_element(
-                        session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
+                if session._streaming_closed:
+                    ok = await _fallback_write_answer(
+                        self._client, session.card_id, content, sequence=session.sequence,
                     )
-                    state.answer_dirty = False
-                except FeishuAPIError as e:
-                    if e.code == CARDKIT_STREAMING_CLOSED:
-                        session._streaming_closed = True
-                        return
-                    _logger.debug("unified stream_element failed: %s", e)
+                    if ok:
+                        state.answer_dirty = False
+                else:
+                    try:
+                        await self._client.cardkit_stream_element(
+                            session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
+                        )
+                        state.answer_dirty = False
+                    except FeishuAPIError as e:
+                        if e.code == CARDKIT_STREAMING_CLOSED:
+                            if not session._streaming_closed_logged:
+                                _logger.info(
+                                    "HLS: unified stream (phase 2) — streaming closed, falling back to in-place partial_update: card=%s",
+                                    session.card_id[:12],
+                                )
+                                session._streaming_closed_logged = True
+                            session._streaming_closed = True
+                            session.sequence += 1
+                            ok = await _fallback_write_answer(
+                                self._client, session.card_id, content, sequence=session.sequence,
+                            )
+                            if ok:
+                                state.answer_dirty = False
+                            return
+                        _logger.debug("unified stream_element failed: %s", e)
 
             if not state.panel_dirty and not state.tool_steps_dirty and not state.answer_dirty:
                 return  # Phase 2 done, nothing more to do
@@ -624,30 +643,41 @@ class UnifiedControllerMixin:
             # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
             content = state.escaped_answer_view() or " "
             session.sequence += 1
-            try:
-                await self._client.cardkit_stream_element(
-                    session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
+            if session._streaming_closed:
+                ok = await _fallback_write_answer(
+                    self._client, session.card_id, content, sequence=session.sequence,
                 )
-                state.answer_dirty = False
-            except FeishuAPIError as e:
-                if e.code == CARDKIT_STREAMING_CLOSED:
-                    if session._streaming_closed_logged:
-                        pass
-                    else:
+                if ok:
+                    state.answer_dirty = False
+            else:
+                try:
+                    await self._client.cardkit_stream_element(
+                        session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
+                    )
+                    state.answer_dirty = False
+                except FeishuAPIError as e:
+                    if e.code == CARDKIT_STREAMING_CLOSED:
+                        if not session._streaming_closed_logged:
+                            _logger.info(
+                                "HLS: unified stream — streaming closed, falling back to in-place partial_update: card=%s",
+                                session.card_id[:12],
+                            )
+                            session._streaming_closed_logged = True
+                        session._streaming_closed = True
+                        session.sequence += 1
+                        ok = await _fallback_write_answer(
+                            self._client, session.card_id, content, sequence=session.sequence,
+                        )
+                        if ok:
+                            state.answer_dirty = False
+                        return
+                    if is_element_not_found_error(e):
                         _logger.info(
-                            "HLS: unified stream — streaming closed, will be handled by TTL or seal: card=%s",
+                            "HLS: unified stream — 300313, will retry on next flush: card=%s",
                             session.card_id[:12],
                         )
-                        session._streaming_closed_logged = True
-                    session._streaming_closed = True
-                    return
-                if is_element_not_found_error(e):
-                    _logger.info(
-                        "HLS: unified stream — 300313, will retry on next flush: card=%s",
-                        session.card_id[:12],
-                    )
-                    return
-                _logger.debug("HLS: unified stream_element failed: %s", e)
+                        return
+                    _logger.debug("HLS: unified stream_element failed: %s", e)
 
         if state.panel_dirty or state.answer_dirty or state.tool_steps_dirty:
             self._schedule_linear_flush(session)
@@ -756,38 +786,45 @@ class UnifiedControllerMixin:
                         state.tool_steps_dirty = False
 
                 # ── Flush remaining answer text ──
-                if state.answer_dirty and "answer" in session._creation_stages and not session._streaming_closed:
+                if state.answer_dirty and "answer" in session._creation_stages:
                     # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
                     content = state.escaped_answer_view() or " "
-                    try:
-                        session.sequence += 1
-                        _logger.info(
-                            "HLS: seal drain answer text len=%d card=%s",
-                            len(content), card_id[:12],
-                        )
-                        await self._client.cardkit_stream_element(
-                            session.card_id, ANSWER_ELEMENT_ID, content,
+                    session.sequence += 1
+                    if session._streaming_closed:
+                        await _fallback_write_answer(
+                            self._client, card_id, content,
                             sequence=session.sequence,
                         )
                         state.answer_dirty = False
-                    except FeishuAPIError as e:
-                        # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
-                        if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
-                            if e.code == CARDKIT_STREAMING_CLOSED:
-                                session._streaming_closed = True
+                    else:
+                        try:
                             _logger.info(
-                                "HLS: seal drain answer — %s, falling back to partial_update_element card=%s",
-                                "streaming closed" if e.code == CARDKIT_STREAMING_CLOSED else "300313",
-                                card_id[:12],
+                                "HLS: seal drain answer text len=%d card=%s",
+                                len(content), card_id[:12],
                             )
-                            session.sequence += 1
-                            await _fallback_write_answer(
-                                self._client, session.card_id, content,
+                            await self._client.cardkit_stream_element(
+                                card_id, ANSWER_ELEMENT_ID, content,
                                 sequence=session.sequence,
                             )
-                        else:
-                            _logger.warning("HLS: seal drain answer failed: %s", e)
-                        state.answer_dirty = False
+                            state.answer_dirty = False
+                        except FeishuAPIError as e:
+                            # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
+                            if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
+                                if e.code == CARDKIT_STREAMING_CLOSED:
+                                    session._streaming_closed = True
+                                _logger.info(
+                                    "HLS: seal drain answer — %s, falling back to partial_update_element card=%s",
+                                    "streaming closed" if e.code == CARDKIT_STREAMING_CLOSED else "300313",
+                                    card_id[:12],
+                                )
+                                session.sequence += 1
+                                await _fallback_write_answer(
+                                    self._client, card_id, content,
+                                    sequence=session.sequence,
+                                )
+                            else:
+                                _logger.warning("HLS: seal drain answer failed: %s", e)
+                            state.answer_dirty = False
 
             # ── Step 1: Update unified panel to final state (non-streaming) ──
             seal_actions: list[dict[str, Any]] = []
@@ -1204,43 +1241,51 @@ class UnifiedControllerMixin:
             if state.answer_dirty and "answer" in session._creation_stages:
                 # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
                 content = state.escaped_answer_view() or " "
-                try:
-                    session.sequence += 1
-                    _logger.info(
-                        "HLS: drain answer text len=%d msg=%s",
-                        len(content), (session.message_id or "?")[:12],
-                    )
-                    await self._client.cardkit_stream_element(
-                        session.card_id, ANSWER_ELEMENT_ID, content,
+                session.sequence += 1
+                if session._streaming_closed:
+                    ok = await _fallback_write_answer(
+                        self._client, session.card_id, content,
                         sequence=session.sequence,
                     )
-                    state.answer_dirty = False
-                except FeishuAPIError as e:
-                    # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
-                    # 之前 300309 直接 skip 答案丢失；300313 的 fallback 带 tag 报 300312
-                    if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
-                        if e.code == CARDKIT_STREAMING_CLOSED:
-                            session._streaming_closed = True
-                        # v1.2.0 Y3: streaming closed 日志去重；300313 仍每次打（非重复事件）
-                        if e.code == CARDKIT_STREAMING_CLOSED and session._streaming_closed_logged:
-                            pass
-                        else:
-                            _logger.info(
-                                "HLS: drain answer — %s, falling back to partial_update_element msg=%s",
-                                "streaming closed" if e.code == CARDKIT_STREAMING_CLOSED else "300313",
-                                (session.message_id or "?")[:12],
-                            )
-                            if e.code == CARDKIT_STREAMING_CLOSED:
-                                session._streaming_closed_logged = True
-                        session.sequence += 1
-                        ok = await _fallback_write_answer(
-                            self._client, session.card_id, content,
+                    if ok:
+                        state.answer_dirty = False
+                else:
+                    try:
+                        _logger.info(
+                            "HLS: drain answer text len=%d msg=%s",
+                            len(content), (session.message_id or "?")[:12],
+                        )
+                        await self._client.cardkit_stream_element(
+                            session.card_id, ANSWER_ELEMENT_ID, content,
                             sequence=session.sequence,
                         )
-                        if ok:
-                            state.answer_dirty = False
-                    else:
-                        _logger.warning("HLS: drain answer failed: %s", e)
+                        state.answer_dirty = False
+                    except FeishuAPIError as e:
+                        # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
+                        # 之前 300309 直接 skip 答案丢失；300313 的 fallback 带 tag 报 300312
+                        if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
+                            if e.code == CARDKIT_STREAMING_CLOSED:
+                                session._streaming_closed = True
+                            # v1.2.0 Y3: streaming closed 日志去重；300313 仍每次打（非重复事件）
+                            if e.code == CARDKIT_STREAMING_CLOSED and session._streaming_closed_logged:
+                                pass
+                            else:
+                                _logger.info(
+                                    "HLS: drain answer — %s, falling back to partial_update_element msg=%s",
+                                    "streaming closed" if e.code == CARDKIT_STREAMING_CLOSED else "300313",
+                                    (session.message_id or "?")[:12],
+                                )
+                                if e.code == CARDKIT_STREAMING_CLOSED:
+                                    session._streaming_closed_logged = True
+                            session.sequence += 1
+                            ok = await _fallback_write_answer(
+                                self._client, session.card_id, content,
+                                sequence=session.sequence,
+                            )
+                            if ok:
+                                state.answer_dirty = False
+                        else:
+                            _logger.warning("HLS: drain answer failed: %s", e)
 
             if _drain_round < _MAX_DRAIN_ROUNDS - 1:
                 # v1.7.0 (R2-07): yield ONLY when another round is actually

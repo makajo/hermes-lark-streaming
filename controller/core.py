@@ -530,18 +530,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not self.enabled:
             return
 
-        # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        # If an explicit continuation mapping was registered, route to it
         if text:
-            new_id = self._maybe_reactivate_for_continuation(message_id)
-            if new_id is not None:
-                _logger.info(
-                    "HLS: on_answer routed to continuation session "
-                    "old_msg=%s new_msg=%s text_len=%d",
-                    (message_id or "?")[:12],
-                    new_id[:12],
-                    len(text),
-                )
-                message_id = new_id
+            cont_id = self._resolve_continuation_id(message_id)
+            if cont_id is not None:
+                message_id = cont_id
 
         session = self._get_active_session(message_id)
         if session is None or session.guard.should_skip("on_answer"):
