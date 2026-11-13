@@ -755,30 +755,71 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     return clean or None
 
 
+_THREAD_ONLY_META_KEYS = frozenset({
+    "thread_id", "reply_to_message_id", "source_message_id", "platform",
+})
+
+
+_MAX_TOOL_NAME_LEN = 64
+
+
+def _is_structured_progress_segment(seg: str, *, allow_bare_fence: bool = True) -> bool:
+    """单个逻辑段是否具备明确的工具/思考进度结构（非普通散文或未标工具的 emoji 长文）."""
+    from ..cardkit.progline import _EMOJI_RE, _THINKING_PREFIX, parse_progress_line, strip_dedup_suffix
+    from ..composer.classify import _PLATFORM_NOTICE_RES
+
+    s = strip_dedup_suffix(seg)
+    if not s:
+        return False
+    if s.startswith(_THINKING_PREFIX):
+        return True
+    if any(rx.match(s) for rx in _PLATFORM_NOTICE_RES):
+        return True
+    lines = s.splitlines()
+    has_fence_line = any(ln.strip().startswith("```") for ln in lines)
+    if has_fence_line:
+        kind, tool, _clean = parse_progress_line(s)
+        if kind != "tool" or not tool or len(tool) > _MAX_TOOL_NAME_LEN:
+            return False
+        first = lines[0].strip()
+        if first == "```":
+            return allow_bare_fence
+        return bool(first) and not first.startswith("```") and bool(_EMOJI_RE.match(first))
+    if not _EMOJI_RE.match(s):
+        return False
+    kind, tool, _clean = parse_progress_line(s)
+    return kind == "tool" and bool(tool) and len(tool) <= _MAX_TOOL_NAME_LEN
+
+
+def _is_oversized_progress_snapshot(content: str, st: Any) -> bool:
+    """判定超启发式长度阈值（>300/600/4000）的裸发消息是否为工具进度快照.
+
+    根因（2026-11-13 实测 3 起）：``tool_preview_length=9999`` + ``accumulate``
+    模式会把从首步至今的全量工具行滚雪球重发，一旦突破 4000 字符旧兜底上限，
+    原宽吸收放行落回 ``super().send()``，在流式卡片下方漏出原生 ``post`` 工具日志。
+    以首段面板重合或全段结构化工具签名精准放行，同时保留对 ``✅ xxx...`` 整页
+    散文回复的误吸收防护。
+    """
+    from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
+
+    segs = split_progress_segments(content)
+    if not segs:
+        return False
+    status_lines = getattr(st, "status_lines", None) or ()
+    if st is not None and status_lines:
+        existing = {strip_dedup_suffix(ln) for ln in status_lines if ln}
+        if strip_dedup_suffix(segs[0]) in existing:
+            return True
+    return all(
+        _is_structured_progress_segment(seg, allow_bare_fence=(st is not None))
+        for seg in segs
+    )
+
+
 def _upgrade_plain_to_progress(
     composer: Any, chat_id: str, content: str, metadata: dict[str, Any] | None = None,
 ) -> Any | None:
-    """v2.0.1 上下文升格：裸 send → CH_PROGRESS（v2.0.4 起不再要求活跃卡片）.
-
-    edit-transport 平台（feishu）的工具进度气泡首条是裸 send —— hermes 只给
-    native-stream / 预览路径打 ``expect_edits``，工具进度气泡
-    （``run_turn_runner._send_progress_text``）首发不带任何标记。若无此规则，
-    气泡会落 CH_PLAIN 成独立纯文本消息，卡片状态面板永远为空。
-
-    升格条件：
-      文本命中进度启发式（💬 前缀或 emoji 开头的短行）。
-
-    v2.0.4（s70 回流）：去掉"本 chat 存在活跃流式卡片"前置——工具帧常早于
-    答案首帧（卡片尚未建立），必须先升格才能被 engine 暂存并立即建卡；
-    无卡片时升格结果只是进入 pending 暂存（TTL 兜底），无副作用。非 turn
-    场景（cron / 后台 / 独立投递）带 notify=True → CH_FINAL，不受影响。
-
-    误吸收代价评估：短 emoji 文本只有进度气泡一种生产形态（cron 定时投递
-    不落此路径），可接受。
-
-    返回升格后的 ``ClassifyResult``；不满足条件返回 ``None``（维持原分类）。
-    永不抛异常（内部全吞，失败维持原分类）。
-    """
+    """v2.0.1 上下文升格：裸 send → CH_PROGRESS（v2.0.4 起不再要求活跃卡片）."""
     try:
         from ..composer.classify import (
             CH_PROGRESS,
@@ -789,26 +830,34 @@ def _upgrade_plain_to_progress(
         )
 
         meta = metadata or {}
-        # v2.0.8：notify/非对话通知（💾 Self-improvement review 等）永不升格 ——
+        # v2.0.8：notify/非对话通知（💾 Self-improvement review 等）/cron(job_id) 永不升格 ——
         # 这类帧在建卡条件不成立时会新建跑马灯卡（用户验收问题4 根因家族）。
-        if meta.get("notify") or meta.get("non_conversational"):
+        if meta.get("notify") or meta.get("non_conversational") or meta.get("job_id"):
             return None
         if not content or _is_notice_text(content):
             return None
-        # v2.0.31 回合内宽吸收（双贴修复）：活跃卡片期（回合进行中）的无标记
-        # plain 帧一律视为工具进度——启发式（emoji/300字）覆盖不了真实形态
-        #（`🔧 Editing C:/...` 带全路径超 300、`💻 terminal\n```长命令``` 超
-        # 600，2026-11-07 route-trace 实锤），漏网即落原生文本 → 面板+散文本
-        # 双贴。回合内判定 = 无任何 metadata 标记（cron/notify 帧不进来，
-        # 上面已拦）+ composer 有活跃卡或暂存。长度 4000 兜底防整页答案误吸收。
+        # v2.0.31 回合内宽吸收 + v2.0.36 累积进度超长快照吸收：
+        # 1) 结构化进度快照（如 accumulate 滚雪球突破 4000 字符或单条超长命令）：
+        #    无非 thread 标记时一律吸收进面板，避免漏成原生 post 散文本；
+        # 2) 非结构化短文本（<=4000 字符、无 metadata、活跃卡在场）：维持宽吸收；
+        # 3) 超长散文（如 >4000 的普通回复 `✅ xxx...`）：维持 return None 不误吸。
         if not is_progress_text(content):
-            if meta or len(content) > 4000:
-                return None
-            try:
-                if composer.active_state(chat_id) is None:
+            st = None
+            if composer is not None and hasattr(composer, "active_state"):
+                try:
+                    st = composer.active_state(chat_id)
+                except Exception:  # noqa: BLE001 — 状态查询失败维持原分类
                     return None
-            except Exception:  # noqa: BLE001 — 状态查询失败维持原分类
-                return None
+            non_thread_meta = {
+                k: v for k, v in meta.items() if k not in _THREAD_ONLY_META_KEYS
+            }
+            if not non_thread_meta and _is_oversized_progress_snapshot(content, st):
+                pass
+            else:
+                if meta or len(content) > 4000:
+                    return None
+                if st is None:
+                    return None
         # v2.0.4（s70 回流）：不再要求"必须有活跃卡片"——工具帧常早于答案首帧
         #（卡片尚未建立），升格后由 engine._on_progress 暂存并立即建卡。非 turn
         # 场景（cron/standalone/notify 投递）带 notify=True → CH_FINAL，不受影响。
