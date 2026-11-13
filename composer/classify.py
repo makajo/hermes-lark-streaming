@@ -43,39 +43,95 @@ CH_FINAL = "final"        # turn 定稿
 CH_PLAIN = "plain"        # 普通消息（cron / 后台 / 无标记发送）→ 原生路径
 
 
-# ── v2.0.8 非对话通知识别（用户验收「Self-improvement review 新卡跑马灯不止」）──
-# hermes 的后台通知（background_review / 长任务心跳 / 更新通告）经
-# _send_status_text 投递，metadata 只带 _interim_send（_non_conversational
-# 标记仅 Discord 生效，见 gateway/run.py）。这类文本带 emoji → 命中进度启发式
-# → 卡片定稿后仍触发 _on_progress 建新卡（streaming_mode + spinner）→ 永无
-# finalize → 跑马灯不止。官方先例：内置 Discord 适配器同清单正则抑制
-# （plugins/platforms/discord/adapter.py _DISCORD_NONCONVERSATIONAL_*）。
-# V2 语义对齐 V1 defer_background_review：活跃卡 → 并入面板；无卡 → 原生文本。
-#
-# v2.0.34 网关生命周期通知（用户症状③「shutdown 卡永久跑马灯」，logs-v33
-# 取证）：停机/重启通知经 gateway/run_shutdown.py
-# _notify_active_sessions_of_shutdown → adapter.send(msg,
-# metadata=_interim_metadata(...)) 强制 _interim_send（run_shutdown.py:
-# 1006-1013，官方 #98432），模板 locales gateway.shutdown.*（逐字节核验）：
-#   en notice_shutdown/restart: "⚠️ Hermes is shutting down|restarting — your current task …"
-#   zh notice_shutdown/restart: "⚠️ Hermes 正在关闭——/正在重启——你当前的任务将被中断。…"
-#   en cron_interrupted: "⚠️ Scheduled job '{job}' was cut short because Hermes is {action}; …"
-#   zh cron_interrupted: "⚠️ 定时任务 '{job}' 因 Hermes {action}而被中断；…"
-# ⚠️ emoji 开头 ≤300 字符此前命中 _is_progress_text → CH_PROGRESS →
-# _on_progress 无卡分支 early-create 流式卡 → 网关 ~1.1s 后进程退出、无
-# finalize → 永久跑马灯（agent.log:21619 card=7706182798772669698 全日志唯一
-# 命中；面板标题误计「agent loop · 1 个工具」同源）。归入本清单 → notice 语义
-# （活跃卡并入面板 / 无卡原生文本），永不建卡；锚定 i18n 模板特征短语，
-# en+zh 双语与动词表同口径。进程退出兜底另见 v2.0.33 disconnect 收口。
+# ── v2.0.8 / v2.0.34 / v2.0.37 非对话通知识别 ───────────────────────────────
+# hermes 的后台通知（background_review / 长任务心跳 / 更新通告 / 启动重启 /
+# 停机通告 / Cron 存储 / DB 告警 / 卡住告警 / 审批超时 / 后台任务 / 语音回显）
+# 经 _send_status_text(_interim_send=True) 或 adapter.send(metadata=None) 投递
+# （_non_conversational 标记仅 Discord 生效，见 gateway/run.py）。
+# 这类文本带 emoji 且常 ≤300 字 → 若未先命中本清单会落入 _is_progress_text →
+# CH_PROGRESS → _on_progress 无卡分支 early-create 流式卡（streaming_mode +
+# spinner「点点点」永挂），并在卡未落定前劫持用户下一条消息的回复/工具流。
+# 归入本清单后：
+# - _interim_send 路径 → CH_INTERIM advisory（活跃卡并入面板 / 无卡原生文本）；
+# - plain 无标记路径 → 不升格 CH_PROGRESS，保持 CH_PLAIN（无活跃卡走静态
+#   oneshot 定稿卡或原生文本），永不建流式占位卡。
+# 锚定 i18n 模板特征短语，en + zh + zh-hant 三语覆盖（locales/*.yaml 逐字节核验）。
 _NOTICE_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*💾\s*Self-improvement review:\s+\S", re.IGNORECASE),
+    # display.review.summary_callback / summary_cli（en / zh / zh-hant）
+    re.compile(
+        r"^\s*💾\s*(?:Self-improvement review|自我改进回顾|自我改進檢閱)\s*[:：]\s*\S",
+        re.IGNORECASE,
+    ),
+    # 旧版 / memory_notifications: on / verbose 形态
+    re.compile(
+        r"^\s*💾\s+(?:Memory\s+updated|记忆已更新|記憶已更新|"
+        r"(?:Memory|Skill|User\s+profile|记忆|技能|用户画像|記憶|使用者設定檔)已更新|"
+        r"Skill\s+['\"].+?['\"]\s+(?:created|updated|improved|patched)|"
+        r"(?:技能|User\s+profile|用户画像|使用者設定檔)\s+['\"].+?['\"]\s+"
+        r"(?:created|updated|improved|patched|已(?:创建|重写|修补|写入|移除|删除|建立|重寫|修補|寫入|移除|刪除)))",
+        re.IGNORECASE,
+    ),
+    # gateway.progress.working_heartbeat（en / zh / zh-hant）
     re.compile(r"^\s*⏳\s+Working\s+—\s+\d+\s+min(?:\s|$)", re.IGNORECASE),
-    re.compile(r"^\s*(?:✅|❌)\s+Hermes update\s+(?:finished|failed|timed out)", re.IGNORECASE),
-    re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)", re.IGNORECASE),
-    # v2.0.34：gateway.shutdown.*（en + zh 双语，锚定模板特征短语）
+    re.compile(r"^\s*⏳\s+(?:正在处理|處理中)\s*(?:——|—)\s*\d+\s*(?:分钟|分鐘)(?:\s|$|—|，|,)"),
+    # gateway.update.*（en / zh / zh-hant）
+    re.compile(
+        r"^\s*(?:✅|❌)\s+Hermes\s+(?:update\s+(?:finished|failed|timed out)|"
+        r"更新(?:已完成|成功完成|已成功完成|完成|失败|失敗|已超时|已逾時))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*☤\s+(?:Starting Hermes update|\*\*Update needs your input|"
+        r"\*\*更新需要你的输入|\*\*更新需要你的輸入|正在启动 Hermes 更新|正在啟動 Hermes 更新)",
+        re.IGNORECASE,
+    ),
+    # gateway.startup.* / gateway.restart.*（en / zh / zh-hant）
+    re.compile(r"^\s*♻\uFE0F?\s+Gateway\s+(?:restarted successfully|online\b)", re.IGNORECASE),
+    re.compile(r"^\s*♻\uFE0F?\s+(?:网关已成功重启|网关已上线|閘道已成功重新啟動|閘道已上線)"),
+    re.compile(r"^\s*♻\uFE0F?\s+(?:Restarting gateway|正在重启网关|正在重新啟動閘道)", re.IGNORECASE),
+    # gateway.shutdown.*（en / zh / zh-hant）
     re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+is\s+(?:shutting\s+down|restarting)\b", re.IGNORECASE),
-    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+(?:正在关闭|正在重启)——"),
-    re.compile(r"^\s*⚠\uFE0F?\s+(?:Scheduled\s+job|定时任务)\s+'", re.IGNORECASE),
+    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+(?:正在关闭|正在重启|正在關閉|正在重新啟動)\s*(?:——|—)"),
+    re.compile(r"^\s*⚠\uFE0F?\s+(?:Scheduled\s+job|定时任务|排程任務)\s+'", re.IGNORECASE),
+    # gateway.draining / gateway.busy.drain_* / gateway.restart.in_progress
+    re.compile(
+        r"^\s*⏳\s+(?:Draining\s+\d+|正在等待\s*\d+\s*个活跃代理|正在等待\s*\d+\s*個活躍代理|"
+        r"Gateway\s+(?:is\s+)?(?:restarting|shutting down|restart already in progress)|"
+        r"网关(?:正在重启|正在关闭|重启已在进行中)|閘道(?:正在重新啟動|正在關閉|重新啟動已在進行中))",
+        re.IGNORECASE,
+    ),
+    # gateway.cron_store.* / gateway.startup.db_* / session_stall / progress.stuck_warning
+    re.compile(r"^\s*(?:⚠\uFE0F?|✅)\s+Cron\s+(?:store\s+|存储|儲存區)", re.IGNORECASE),
+    re.compile(
+        r"^\s*⚠\uFE0F?\s+(?:Session database\b|检测到会话数据库|会话数据库|偵測到工作階段資料庫|工作階段資料庫)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*⚠\uFE0F?\s+(?:I seem to be stuck\b|我似乎卡住了)", re.IGNORECASE),
+    # gateway.exec_approval.timed_out_notice / gateway.approval_expired
+    re.compile(r"^\s*⌛\s+(?:Approval timed out|审批已超时|審批已逾時|批准已逾時)", re.IGNORECASE),
+    re.compile(r"^\s*⚠\uFE0F?\s+(?:Approval expired|批准已过期|批准已逾期)", re.IGNORECASE),
+    # gateway.background.*
+    re.compile(
+        r"^\s*(?:✅|❌|⏳|🔄)\s+(?:Background task\s+(?:started|finished|failed|still running|complete)|"
+        r"Your background task\s+\"|The background task couldn't start|"
+        r"后台任务(?:已启动|已完成|失败|仍在运行|完成|无法启动)|你的后台任务|"
+        r"背景任務(?:已啟動|已完成|失敗|仍在執行|完成|無法啟動)|你的背景任務)",
+        re.IGNORECASE,
+    ),
+    # gateway.voice.transcript_echo_short（🎙️ "..."）
+    re.compile(r'^\s*🎙\uFE0F?\s+"[\s\S]*"\s*$'),
+    # gateway.goal.* / heartbeat.* / notify.*
+    re.compile(
+        r"^\s*(?:⏸|▶)\uFE0F?\s+(?:Goal|Heartbeat|目标|心跳|目標)\s*(?:paused|resumed|已暂停|已恢复|已暫停|已恢復)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*⚠\uFE0F?\s+(?:Couldn't deliver the |Message delivery failed after multiple attempts|"
+        r"无法发送(?:音频|视频|文件|图片)附件|多次尝试后消息仍发送失败|"
+        r"無法傳送(?:音訊|視訊|檔案|圖片)附件|多次嘗試後訊息仍無法送達)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*📬\s+(?:No home channel is set|\S+\s+(?:尚未设置主频道|尚未設定主頻道))", re.IGNORECASE),
 )
 
 

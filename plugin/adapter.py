@@ -357,7 +357,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     async def _send_impl(
         self, chat_id: str, content: str, reply_to: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> Any:
-        from ..composer.classify import CH_INTERIM, CH_PLAIN, classify_send
+        from ..composer.classify import CH_INTERIM, CH_PLAIN, _is_notice_text, classify_send
 
         try:
             cls = classify_send(content, metadata)
@@ -383,6 +383,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         if (
             cls is not None and cls.channel == CH_INTERIM and cls.kind == "advisory"
             and bool((reply_to or "").strip())
+            and not _is_notice_text(content)
         ):
             cls.meta["conversational_commentary"] = True
         # 【锚点归一】Hermes 流式消费者把用户触发消息 ID 放在 metadata.reply_to_message_id
