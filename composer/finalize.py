@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -83,6 +84,39 @@ def _resolve_model_name() -> str:
         return ""
 
 
+def _footer_wants_balance(fields: list[list[str]]) -> bool:
+    """页脚字段表里是否显式声明了 ``balance``（未声明 → 不查询，零成本）。"""
+    return any(
+        str(name).strip().lower() == "balance"
+        for row in fields
+        for name in row
+    )
+
+
+def _deepseek_official_route() -> bool:
+    """当前网关主模型是否走 DeepSeek 官方端点。
+
+    余额字段只在官方 API 有意义（CPA 等中转渠道查不到；自定义 base_url 也
+    不一定是官方账户）。判定读 config.yaml 单一事实源：``model.provider``
+    为 ``deepseek``，且 base_url 未覆盖或确实指向 deepseek.com。
+    """
+    try:
+        from gateway.run import _load_gateway_config
+
+        config = _load_gateway_config() or {}
+    except Exception:  # noqa: BLE001 — 取不到配置就当非官方，宁可不显示
+        return False
+    model_cfg = config.get("model")
+    if not isinstance(model_cfg, dict):
+        return False
+    if str(model_cfg.get("provider") or "").strip().lower() != "deepseek":
+        return False
+    base_url = str(
+        model_cfg.get("base_url") or os.environ.get("DEEPSEEK_BASE_URL") or ""
+    ).strip().lower()
+    return not base_url or "deepseek.com" in base_url
+
+
 async def _seal_footer(
     client: Any,
     state: Any,
@@ -103,9 +137,18 @@ async def _seal_footer(
     reasoning_level = Config().footer_reasoning_level
     if reasoning_level:
         footer_data["reasoning_effort"] = reasoning_level
+    # v2.0.35：DeepSeek 官方账户余额（仅当页脚声明 balance 且主模型走官方端点；
+    # 中转/自定义端点不查——查了也不是同一个账户）。失败/超时空值 → 字段跳过。
+    effective_fields = footer_fields or _DEFAULT_FOOTER_FIELDS
+    if _footer_wants_balance(effective_fields) and _deepseek_official_route():
+        from .balance import deepseek_balance_text
+
+        balance_text = await deepseek_balance_text()
+        if balance_text:
+            footer_data["balance"] = balance_text
     elements = _build_footer_elements(
         footer_data,
-        fields=footer_fields or _DEFAULT_FOOTER_FIELDS,
+        fields=effective_fields,
         show_label=show_label,
     )
     if not elements:

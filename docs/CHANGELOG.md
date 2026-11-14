@@ -1,5 +1,14 @@
 # 更新日志
 
+## v2.0.35（2026-11-14）
+
+| 类型 | 变更 |
+|------|------|
+| 新增 | **页脚 DeepSeek 官方余额字段（`balance`）**：定稿页脚末位追加 `余额 ¥25.42`（en `Balance ¥25.42`）。数据源 `GET https://api.deepseek.com/user/balance`（Bearer `DEEPSEEK_API_KEY`，CNY 优先、USD 兜底）。实现 `composer/balance.py`：3 s 超时 + 进程内 TTL 缓存（成功 30 s / 失败 60 s），任何异常返空 → 渲染层跳过字段，绝不阻塞或打断定稿 |
+| 门控 | 仅当 ① 页脚字段表显式声明 `balance`（未声明零成本不查询）且 ② 主模型走 DeepSeek 官方端点（`model.provider == deepseek` 且 base_url 未覆盖或含 `deepseek.com`）时查询；CPA 等中转/自定义端点一律不查（不是同一账户）。已知取舍：页脚 model/provider 与既有 model 字段同源读 config.yaml，回合内 `/model` 临时切换或触发 fallback 时不改写余额归属 |
+| 版本 | `plugin.yaml: version 2.0.35`；README 徽章同步；测试 +10（渲染双语/空值跳过/CNY 优先/USD 兜底/畸形载荷/门控三态） |
+| 验证 | pytest 165 passed（`test_cardkit` + `test_config` + `test_v235_footer_balance`）；真实余额查询实测返回 `¥24.55`，页脚渲染 `已完成 · 6m 52s · deepseek-flash · 余额 ¥24.55` |
+
 ## v2.0.34（2026-11-10）
 
 > 审计方法：用户三症状（2026-11-10 日志包 logs-v33 + hermes-agent@8b50838 源码 + 插件 v2.0.33 代码三方互证，原始帧形状逐字节取证，hermes locales 模板直接核验）→ 按用户裁决收敛修复面（第一原则不注册钩子）→ 实施。

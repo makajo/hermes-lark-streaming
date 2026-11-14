@@ -440,6 +440,14 @@ def _render_footer_field(
         v = data.get("model") or None
         return v, v
 
+    if name == "balance":
+        # v2.0.35：DeepSeek 官方账户余额（finalize._seal_footer 仅在走官方端点
+        # 时供值；缺失即跳过，绝不显示占位符）。
+        v = str(data.get("balance") or "").strip()
+        if not v:
+            return None, None
+        return f"Balance {v}", f"余额 {v}"
+
     if name == "tokens":
         input_t = data.get("input_tokens", 0) or 0
         output_t = data.get("output_tokens", 0) or 0
